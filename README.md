@@ -14,7 +14,7 @@ This repository provides RL framework for Quadruped robotics tasks. It allows yo
 - It's recommended to create a new python environment for the repository(e.g. Conda environment)
 :
     ```bash
-    conda create -n frankarl python=3.11
+    conda create -n loco python=3.11
     conda activate loco
     ```
 
