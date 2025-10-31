@@ -1,0 +1,146 @@
+seed: 42
+device: cuda:0
+num_steps_per_env: 24
+max_iterations: 10000
+empirical_normalization: false
+
+num_obs: 45
+num_pre_obs: 45
+num_action: 12
+
+obs_groups: {} 
+
+algorithm:
+  class_name: PPO
+  num_learning_epochs: 8
+  num_mini_batches: 4
+  learning_rate: 0.0008
+  schedule: adaptive
+  gamma: 0.99
+  lam: 0.95
+  entropy_coef: 0.01
+  desired_kl: 0.03
+  max_grad_norm: 1.0
+  value_loss_coef: 0.5
+  use_clipped_value_loss: true
+  clip_param: 0.2
+  normalize_advantage_per_mini_batch: false
+  symmetry_cfg: null
+  rnd_cfg: null
+
+policy:
+  class_name: ActorCriticWithTransformer
+  num_obs: ${..num_obs}
+  num_action: ${..num_action}
+  init_noise_std: 1.0  # Initial action noise standard deviation (探索噪声)
+  noise_std_type: scalar  # Type of noise std: "scalar" or "log"
+  actor_config:
+    _target_: Franka_RL.models.transformer.Transformer
+    _recursive_: False
+    num_out: ${..num_action}
+    config:
+      transformer_token_size: ${.latent_dim}
+      # latent_dim: 512
+      # ff_size: 1024
+      latent_dim: 256
+      ff_size: 512
+      num_layers: 4
+      num_heads: 4
+      dropout: 0
+
+      activation: relu
+      use_layer_norm: false
+
+      # ==================== RoPE Configuration ====================
+      # 启用 RoPE（Rotary Position Embedding）用于长时间记忆
+      use_rope: true
+      
+      # RoPE 基频参数 - 控制位置编码的频率范围
+      rope_theta: 5000.0
+      
+      # 最大序列长度 - 机器人的记忆时间步数
+      max_sequence_length: 100
+      
+      # ==================== Sequence Caching Configuration ====================
+      # 启用序列缓存 - 累积历史观测以实现多步注意力
+      # 设为 true 时，Transformer 会维护 max_sequence_length 步的历史缓存
+      # 设为 false 时，退回到单步处理（用于调试或对比）
+      enable_sequence_caching: true
+
+      input_models:
+        obs_mlp:
+          _target_: Franka_RL.models.mlp.MLP_WithNorm
+          _recursive_: False
+          num_in: ${.....num_obs}
+          num_out: ${...transformer_token_size}
+          config:
+            mask_key: null
+            obs_key: self_obs
+            slice_start_idx: 0
+            slice_end_idx: 45
+            normalize_obs: True
+            norm_clamp_value: 5
+            layers:
+              - units: 256
+                activation: relu
+                use_layer_norm: false
+              - units: 256
+                activation: relu
+                use_layer_norm: false
+      output_model:
+        _target_: Franka_RL.models.mlp.MLP
+        _recursive_: False
+        num_in: ${..transformer_token_size}
+        num_out: ${....num_action}
+        config:
+          layers:
+            - units: 1024
+              activation: relu
+              use_layer_norm: false
+            - units: 1024
+              activation: relu
+              use_layer_norm: false
+            - units: 1024
+              activation: relu
+              use_layer_norm: false
+
+  critic_config:
+    _target_: Franka_RL.models.mlp.MultiHeadedMLP
+    _recursive_: False
+    num_out: 1
+    config:
+      input_models:
+        self_obs:
+          _target_: Franka_RL.models.common.Flatten
+          _recursive_: False
+          num_in: ${......num_pre_obs}
+          num_out: ${.num_in}
+          config:
+            obs_key: self_obs
+            slice_start_idx: 0
+            slice_end_idx: 45
+            normalize_obs: True
+            norm_clamp_value: 5
+      trunk:
+        _target_: Franka_RL.models.mlp.MLP
+        _recursive_: False
+        num_out: 1
+        config:
+          layers:
+            - units: 1024
+              activation: relu
+              use_layer_norm: false
+            - units: 512
+              activation: relu
+              use_layer_norm: false
+
+clip_actions: null
+save_interval: 100
+experiment_name: Go2_Train
+run_name: ''
+logger: tensorboard
+neptune_project: isaaclab
+wandb_project: isaaclab
+resume: false
+load_run: .*
+load_checkpoint: model_.*.pt

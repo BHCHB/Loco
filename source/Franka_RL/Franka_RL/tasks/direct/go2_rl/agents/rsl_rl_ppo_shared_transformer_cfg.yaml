@@ -1,0 +1,144 @@
+seed: 42
+device: cuda:0
+num_steps_per_env: 24
+max_iterations: 10000
+empirical_normalization: false
+
+num_obs: 45
+num_pre_obs: 45
+num_action: 12
+
+obs_groups: {} 
+
+algorithm:
+  class_name: PPO
+  num_learning_epochs: 8
+  num_mini_batches: 4
+  learning_rate: 0.0008
+  schedule: adaptive
+  gamma: 0.99
+  lam: 0.95
+  entropy_coef: 0.01
+  desired_kl: 0.03
+  max_grad_norm: 1.0
+  value_loss_coef: 0.5
+  use_clipped_value_loss: true
+  clip_param: 0.2
+  normalize_advantage_per_mini_batch: false
+  symmetry_cfg: null
+  rnd_cfg: null
+
+
+policy:
+  class_name: ActorCriticSharedTransformer  
+  num_obs: ${..num_obs}
+  num_action: ${..num_action}
+  init_noise_std: 1.0
+  noise_std_type: scalar
+  
+  # ===================== Shared Transformer Encoder =====================
+  # This encoder is shared between Actor and Critic networks
+  shared_encoder_config:
+    _target_: Franka_RL.models.transformer.Transformer
+    _recursive_: False
+    num_out: 256  # latent_dim - output feature dimension
+    config:
+      transformer_token_size: ${.latent_dim}
+      latent_dim: 256
+      ff_size: 512
+      num_layers: 4
+      num_heads: 8
+      dropout: 0.0
+      activation: relu
+      use_layer_norm: false
+
+      # ==================== RoPE Configuration ====================
+      # Enable RoPE (Rotary Position Embedding) for long-term memory
+      use_rope: true
+      rope_theta: 5000.0
+      max_sequence_length: 100
+      
+      # Enable sequence caching - accumulate history for multi-step attention
+      enable_sequence_caching: true
+      # ============================================================
+
+      # Input MLP: observation → transformer token
+      input_models:
+        obs_mlp:
+          _target_: Franka_RL.models.mlp.MLP_WithNorm
+          _recursive_: False
+          num_in: ${.....num_obs}
+          num_out: ${...transformer_token_size}
+          config:
+            mask_key: null
+            obs_key: self_obs
+            slice_start_idx: 0
+            slice_end_idx: 45
+            normalize_obs: true
+            norm_clamp_value: 5
+            layers:
+              - units: 256
+                activation: relu
+                use_layer_norm: false
+              - units: 256
+                activation: relu
+                use_layer_norm: false
+      
+      # Output model: transformer features → latent features
+      # (not used in shared architecture - heads do the final projection)
+      output_model:
+        _target_: Franka_RL.models.mlp.MLP
+        _recursive_: False
+        num_in: ${..transformer_token_size}
+        num_out: ${..latent_dim}
+        config:
+          layers:
+            - units: 512
+              activation: relu
+              use_layer_norm: false
+
+  # ======================== Actor Head ========================
+  # Takes encoder output and produces action mean
+  actor_head_config:
+    _target_: Franka_RL.models.mlp.MLP
+    _recursive_: False
+    num_in: 256  # Should match shared_encoder_config.config.latent_dim
+    num_out: ${...num_action}
+    config:
+      layers:
+        - units: 512
+          activation: relu
+          use_layer_norm: false
+        - units: 512
+          activation: relu
+          use_layer_norm: false
+        - units: 256
+          activation: relu
+          use_layer_norm: false
+
+  # ======================== Critic Head ========================
+  # Takes encoder output and produces state value
+  critic_head_config:
+    _target_: Franka_RL.models.mlp.MLP
+    _recursive_: False
+    num_in: 256  # Should match shared_encoder_config.config.latent_dim
+    num_out: 1
+    config:
+      layers:
+        - units: 512
+          activation: relu
+          use_layer_norm: false
+        - units: 256
+          activation: relu
+          use_layer_norm: false
+
+clip_actions: null
+save_interval: 500
+experiment_name: Go2_Train_SharedTransformer
+run_name: ''
+logger: tensorboard
+neptune_project: isaaclab
+wandb_project: isaaclab
+resume: false
+load_run: .*
+load_checkpoint: model_.*.pt
