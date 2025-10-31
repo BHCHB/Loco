@@ -1,2 +1,0 @@
-iopath
-pytorch3d @ "git+https://github.com/facebookresearch/pytorch3d.git"
