@@ -1,4 +1,4 @@
-# RL for Dexhand & Arm Manipulation
+# RL for Quadruped robot with Transformer
 
 ## Overview
 
@@ -8,14 +8,14 @@ This repository provides RL framework for Dexhand and robotics arm manipulation 
 
 - Clone or copy this repository:
     ```bash
-    git clone https://github.com/yyyds1/Franka_RL.git
+    git clone https://github.com/BHCHB/Loco.git
     ```
 
 - It's recommended to create a new python environment for the repository(e.g. Conda environment)
 :
     ```bash
     conda create -n frankarl python=3.11
-    conda activate frankarl
+    conda activate loco
     ```
 
 - Install Isaac Lab by following the [installation guide](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html).
@@ -56,9 +56,6 @@ This repository provides RL framework for Dexhand and robotics arm manipulation 
     2. (Optional) Create a new Base class e.g `BaseRobot` in `source/Franka_RL/Franka_RL/robots/base.py`.
     3. Create your robot class in `source/Franka_RL/Franka_RL/robots`. Ensure that the robot class inherits from one of the Base class (e.g. `Dexhand` or `BaseRobot`), and it's properly registered in `__init__.py` 
 
-## Datasets
-
- <!-- TODO: complete the Dataset Factory-->
 
 ## RL Libraries
  - The repo provides three RL libraries at present: `rsl_rl`, `rl_games` and `skrl`. It's worth noting that this repo has developed novel `OnPolicyPPORunner` and `ActorCritic` class for `rsl_rl` lib. It is possible to define more complex actor and critic networks, not limited to MLP now. For more details, please check `source/Franka_RL/Franka_RL/runners` for the modified classes, and check `source/Franka_RL/Franka_RL/tasks/direct/franka_rl/agents/rsl_rl_ppo_cfg.yaml` for a template config file. 
@@ -71,7 +68,7 @@ This repository provides RL framework for Dexhand and robotics arm manipulation 
 
     | Task Name | Task Path | Task Description|
     |-------|--------|----|
-    | Franka-Train | source/Franka_RL/Franka_RL/tasks/direct/franka_rl | Train a Franka Panda Arm following end effector trajectories|
+    | Franka-Train | source/Franka_RL/Franka_RL/tasks/direct/go2_rl| Train a Go2 loco|
 ## Troubleshooting
 
 ### Pylance Missing Indexing of Extensions
