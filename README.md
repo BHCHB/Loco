@@ -2,7 +2,7 @@
 
 ## Overview
 
-This repository provides RL framework for Dexhand and robotics arm manipulation tasks. It allows you to train your agent to complete diverse Human-Object Interection(HOI) tasks by imitating demo trajectories.
+This repository provides RL framework for Quadruped robotics tasks. It allows you to train your agent to complete diverse locomotion tasks.
 
 ## Installation
 
