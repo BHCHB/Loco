@@ -41,7 +41,7 @@ This repository provides RL framework for Quadruped robotics tasks. It allows yo
 
     | Category | Robot Model | Config File Path | Branch |
     |------|------|------|------|
-    | Dexhand | Shadow Hand | source/Franka_RL/Franka_RL/robots/Shadow.py | origin/master|
+    | QuadrupedRobotFactory | Go2| source/Franka_RL/Franka_RL/robots/Go2.py | loco |
 
     For instance, the dexhand models can be loaded into environments through `DexHandFactory` class:
     ```python
