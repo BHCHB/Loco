@@ -16,11 +16,12 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.markers.config import FRAME_MARKER_CFG
-from isaaclab.sensors import ContactSensor
+from isaaclab.sensors import ContactSensor, RayCaster
 from isaaclab.utils.math import quat_apply_inverse, quat_apply, sample_uniform
 
 from .go2_env_cfg import Go2EnvCfg
 from Franka_RL.utils.command_helper import DirectCommandHelper, CommandConfig
+from Franka_RL.models import observations_critic
 
 
 class Go2Env(DirectRLEnv):
@@ -91,6 +92,7 @@ class Go2Env(DirectRLEnv):
         """Set up the simulation scene."""
         self.robot = Articulation(self.cfg.robot)
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
+        self._height_scanner = self.cfg.height_scanner.class_type(self.cfg.height_scanner)
         
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
@@ -98,6 +100,7 @@ class Go2Env(DirectRLEnv):
         
         self.scene.articulations["robot"] = self.robot
         self.scene.sensors["contact_sensor"] = self._contact_sensor
+        self.scene.sensors["height_scanner"] = self._height_scanner
         self.scene.clone_environments(copy_from_source=False)
         
         if self.device == "cpu":
@@ -210,33 +213,75 @@ class Go2Env(DirectRLEnv):
         self.last_dof_vel = self.dof_vel.clone()
         
     def _get_observations(self) -> dict:
-        """Compute observations."""
+        """Compute observations (no normalization, returns dict with policy and critic keys)."""
         self._compute_intermediate_values()
 
-        obs_list = []
-        base_lin_vel_obs = self.base_lin_vel_local * self.obs_scales["lin_vel"]
-        obs_list.append(base_lin_vel_obs)
-
-        base_ang_vel_obs = self.base_ang_vel_local * self.obs_scales["ang_vel"]
-        obs_list.append(base_ang_vel_obs)
-
-        commands_obs = self.commands[:, :3] * torch.tensor(self.obs_scales["commands"], device=self.device)
-        obs_list.append(commands_obs)
-
-        dof_pos_normalized = (self.dof_pos - self.default_joint_pos.unsqueeze(0)) * self.obs_scales["dof_pos"]
-        obs_list.append(dof_pos_normalized)
-
-        dof_vel_scaled = self.dof_vel * self.obs_scales["dof_vel"]
-        obs_list.append(dof_vel_scaled)
-
-        obs_list.append(self.last_actions)
+        # Policy observations (45 dims): base_ang_vel, base_rpy, velocity_commands, joint_pos, joint_vel, actions
+        policy_obs_list = []
         
-        obs = torch.cat(obs_list, dim=-1)
-        self._latest_policy_obs_seq = obs.unsqueeze(1)
+        # 1. base_ang_vel (机身角速度，原始值)
+        policy_obs_list.append(self.base_ang_vel_local)
 
-        observations = {"policy": obs}
+        # 2. base_rpy (机身欧拉角，原始值)
+        def quat2euler(q):
+            x, y, z, w = q[:,0], q[:,1], q[:,2], q[:,3]
+            t0 = +2.0 * (w * x + y * z)
+            t1 = +1.0 - 2.0 * (x * x + y * y)
+            roll = torch.atan2(t0, t1)
+            t2 = +2.0 * (w * y - z * x)
+            t2 = torch.clamp(t2, -1.0, 1.0)
+            pitch = torch.asin(t2)
+            t3 = +2.0 * (w * z + x * y)
+            t4 = +1.0 - 2.0 * (y * y + z * z)
+            yaw = torch.atan2(t3, t4)
+            return torch.stack([roll, pitch, yaw], dim=-1)
+        base_rpy = quat2euler(self.base_quat)
+        policy_obs_list.append(base_rpy)
+
+        # 3. velocity_commands (速度指令，原始值)
+        policy_obs_list.append(self.commands[:, :3])
+
+        # 4. joint_pos (关节相对位置，原始值)
+        policy_obs_list.append(self.dof_pos - self.default_joint_pos.unsqueeze(0))
+
+        # 5. joint_vel (关节速度，原始值)
+        policy_obs_list.append(self.dof_vel)
+
+        # 6. actions (上一步的动作)
+        policy_obs_list.append(self.last_actions)
+
+        policy_obs = torch.cat(policy_obs_list, dim=-1)
+        self._latest_policy_obs_seq = policy_obs.unsqueeze(1)
+
+        # Critic observations (238 dims): policy_obs + privileged observations
+        critic_obs = self._get_critic_observations(policy_obs)
+
+        observations = {"policy": policy_obs, "critic": critic_obs}
         self.extras["observations"] = observations
+        
         return observations
+    
+    def _get_critic_observations(self, policy_obs: torch.Tensor) -> torch.Tensor:
+        """Compute critic (privileged) observations.
+        
+        Args:
+            policy_obs: Policy observations [N, 45]
+            
+        Returns:
+            Critic observations [N, 238] = policy_obs + privileged_obs
+            - policy_obs: 45 dims (shared with actor)
+            - base_lin_vel: 3 dims (with noise)
+            - projected_gravity: 3 dims (with noise)
+            - height_scan: 187 dims (17x11 grid, clipped to [-1, 1])
+        """
+        critic_obs_list = [policy_obs]
+        
+        # Add privileged observations
+        critic_obs_list.append(observations_critic.get_base_lin_vel(self, add_noise=True))
+        critic_obs_list.append(observations_critic.get_projected_gravity(self, add_noise=True))
+        critic_obs_list.append(observations_critic.get_height_scan(self, offset=0.5))
+        
+        return torch.cat(critic_obs_list, dim=-1)
         
     def _get_rewards(self) -> torch.Tensor:
         """LocoFormer-style rewards: exponential tracking + regularization penalties."""

@@ -57,9 +57,10 @@ class RunningMeanStd(nn.Module):
         )
         new_var = m_2 / (self.count + batch_count)
 
-        self.mean[:] = new_mean
-        self.var[:] = new_var
-        self.count.fill_(new_count)
+        # Use .data to bypass inference mode restrictions on buffers
+        self.mean.data.copy_(new_mean)
+        self.var.data.copy_(new_var)
+        self.count.data.fill_(new_count)
 
     def maybe_clamp(self, x: Tensor):
         if self.clamp_value is None:

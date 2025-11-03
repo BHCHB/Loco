@@ -27,6 +27,7 @@ from rsl_rl.utils import store_code_state
 
 from Franka_RL.runners.actor_critic_with_transformer import ActorCriticWithTransformer
 from Franka_RL.runners.actor_critic_shared_transformer import ActorCriticSharedTransformer
+from Franka_RL.runners.actor_critic_dual_embedding import ActorCriticWithDualEmbedding
 from Franka_RL.algorithms.ppo_with_dict_obs import PPOWithDictObs
 
 
@@ -53,13 +54,21 @@ class OnPolicyRunnerWithTransformer:
 
         # resolve dimensions of observations
         raw = self.env.get_observations()
+        
         if isinstance(raw, tuple):
             obs, extras = raw
         else:
-        # 构造兼容结构
-            if isinstance(raw, dict):
-                obs = raw.get("policy", next(iter(raw.values())))
-                extras = {"observations": raw}
+        # 构造兼容结构 (handle both dict and TensorDict)
+            if isinstance(raw, dict) or hasattr(raw, 'keys'):
+                # Extract policy observations
+                obs = raw.get("policy", raw[list(raw.keys())[0]]) if hasattr(raw, 'get') else raw[list(raw.keys())[0]]
+                # Convert TensorDict to regular dict for extras
+                if hasattr(raw, 'to_dict'):
+                    extras = {"observations": raw.to_dict()}
+                else:
+                    # For TensorDict, manually extract all keys
+                    obs_dict = {k: raw[k] for k in raw.keys()}
+                    extras = {"observations": obs_dict}
             else:
                 obs = raw
                 extras = {"observations": {"policy": raw}}
@@ -87,7 +96,7 @@ class OnPolicyRunnerWithTransformer:
 
         # evaluate the policy class
         policy_class = eval(self.policy_cfg.pop("class_name"))
-        policy: ActorCritic | ActorCriticRecurrent | StudentTeacher | StudentTeacherRecurrent | ActorCriticWithTransformer | ActorCriticSharedTransformer = policy_class(
+        policy: ActorCritic | ActorCriticRecurrent | StudentTeacher | StudentTeacherRecurrent | ActorCriticWithTransformer | ActorCriticSharedTransformer | ActorCriticWithDualEmbedding = policy_class(
             num_obs, num_privileged_obs, self.env.num_actions, **self.policy_cfg
         ).to(self.device)
 
@@ -231,11 +240,19 @@ class OnPolicyRunnerWithTransformer:
         if hasattr(raw, 'batch_size'):  # TensorDict
             # 使用辅助函数提取 policy observations
             obs = extract_tensor_from_tensordict(raw, key="policy")
-            extras = {"observations": {"policy": obs}}
+            
+            # Extract all observations into extras dict
+            obs_dict = {}
+            for key in raw.keys():
+                obs_dict[key] = extract_tensor_from_tensordict(raw, key=key)
+            extras = {"observations": obs_dict}
             
             # 提取 privileged observations
             if self.privileged_obs_type is not None and self.privileged_obs_type in raw.keys():
                 privileged_obs = extract_tensor_from_tensordict(raw, key=self.privileged_obs_type)
+            elif "critic" in raw.keys():
+                # Try to extract critic observations from dict
+                privileged_obs = extract_tensor_from_tensordict(raw, key="critic")
             else:
                 privileged_obs = obs
         
@@ -305,10 +322,16 @@ class OnPolicyRunnerWithTransformer:
                     
                     # perform normalization
                     obs = self.obs_normalizer(obs)
+                    
+                    # Extract privileged/critic observations
                     if self.privileged_obs_type is not None:
                         privileged_obs_raw = infos["observations"][self.privileged_obs_type].to(self.device)
                         privileged_obs_raw = extract_tensor_from_tensordict(privileged_obs_raw)
                         privileged_obs = self.privileged_obs_normalizer(privileged_obs_raw)
+                    elif "critic" in obs_raw.keys():
+                        # Try to extract critic observations from dict
+                        privileged_obs_raw = extract_tensor_from_tensordict(obs_raw, key="critic")
+                        privileged_obs = privileged_obs_raw.to(self.device)
                     else:
                         privileged_obs = obs
 

@@ -153,8 +153,10 @@ class ActorCriticWithTransformer(nn.Module):
         """
         # Handle dict/TensorDict input
         if isinstance(critic_observations, dict) or hasattr(critic_observations, 'keys'):
-            # Extract tensor from dict - prefer 'policy' key
-            if 'policy' in critic_observations.keys():
+            # Extract tensor from dict - prefer 'critic' key for privileged observations
+            if 'critic' in critic_observations.keys():
+                critic_tensor = critic_observations['critic']
+            elif 'policy' in critic_observations.keys():
                 critic_tensor = critic_observations['policy']
             else:
                 critic_tensor = next(iter(critic_observations.values()))

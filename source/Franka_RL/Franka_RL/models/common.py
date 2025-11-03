@@ -36,24 +36,32 @@ class NormObsBase(nn.Module):
         self.config = config
         self.num_in = num_in
         self.num_out = num_out
+        self.running_obs_norm = None
         self.build_norm()
 
     def build_norm(self):
         if self.config.normalize_obs:
-            self.running_obs_norm = RunningMeanStd(
-                shape=(self.num_in,),
-                device="cpu",
-                clamp_value=self.config.norm_clamp_value,
-            )
+            # Will be initialized with correct device on first forward pass
+            self.running_obs_norm = None
 
     def forward(self, obs, *args, **kwargs):
         if torch.isnan(obs).any():
             raise ValueError("NaN in obs")
+        
         if self.config.normalize_obs:
+            # Lazy initialization with correct device and shape
+            if self.running_obs_norm is None:
+                self.running_obs_norm = RunningMeanStd(
+                    shape=(self.num_in,),
+                    device=obs.device,
+                    clamp_value=self.config.norm_clamp_value,
+                )
+            
             # Only update obs during training
             if self.training:
                 self.running_obs_norm.update(obs)
             obs = self.running_obs_norm.normalize(obs)
+        
         if torch.isnan(obs).any():
             raise ValueError("NaN in obs")
         return obs

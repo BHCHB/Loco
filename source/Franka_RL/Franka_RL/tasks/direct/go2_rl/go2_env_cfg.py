@@ -12,7 +12,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import ContactSensorCfg
+from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
 from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
@@ -65,7 +65,7 @@ class Go2EnvCfg(DirectRLEnvCfg):
     
     observation_space = 45
     action_space = 12
-    state_space = 45
+    state_space = 238  # 45 (policy) + 3 (base_lin_vel) + 3 (base_ang_vel) + 3 (projected_gravity) + 3 (velocity_commands) + 12 (joint_pos) + 12 (joint_vel) + 12 (actions) + 187 (height_scan: 17x11 grid) - 42 (overlap with policy) = 45 + 193
     future_frame = 5
 
     # env
@@ -126,6 +126,16 @@ class Go2EnvCfg(DirectRLEnvCfg):
         debug_vis=False,
     )
     
+    # Height scanner for terrain perception (privileged observation)
+    height_scanner: RayCasterCfg = RayCasterCfg(
+        prim_path="/World/envs/env_.*/Robot/base",
+        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
+        ray_alignment="yaw",  # Updated from deprecated attach_yaw_only=True
+        pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[1.6, 1.0]),
+        debug_vis=False,
+        mesh_prim_paths=["/World/ground"],
+    )
+    
 
     # normalization
     obs_scales = {
@@ -144,6 +154,13 @@ class Go2EnvCfg(DirectRLEnvCfg):
         "dof_pos": 0.01,
         "dof_vel": 0.5,
        # "gravity": 0.05,
+    }
+    
+    # noise for critic observations (privileged)
+    noise_scales_critic = {
+        "base_lin_vel": 0.1,
+        "base_ang_vel": 0.2,
+        "projected_gravity": 0.05,
     }
 
    

@@ -50,13 +50,16 @@ class MultiHeadedMLP(nn.Module):
         self.config = config
         self.num_out = num_out
         self.obs_slice = {}
+        self.obs_key_map = {}  # Map head name to obs_key
 
         input_models = {}
         self.feature_size = 0
         for key, input_cfg in self.config.input_models.items():
             model = instantiate(input_cfg)
             input_models[key] = model
-            self.obs_slice[input_cfg.config.obs_key] = slice(input_cfg.config.slice_start_idx, input_cfg.config.slice_end_idx, input_cfg.config.get("slice_step", 1))
+            # Use head name (key) as slice index to avoid conflicts when multiple heads share same obs_key
+            self.obs_slice[key] = slice(input_cfg.config.slice_start_idx, input_cfg.config.slice_end_idx, input_cfg.config.get("slice_step", 1))
+            self.obs_key_map[key] = input_cfg.config.obs_key
             self.feature_size += model.num_out
         self.input_models = nn.ModuleDict(input_models)
 
@@ -65,11 +68,9 @@ class MultiHeadedMLP(nn.Module):
     def forward(self, input, return_norm_obs=False):
         # Handle dict/TensorDict input
         if isinstance(input, dict) or hasattr(input, 'keys'):
-            # Extract tensor - prefer 'policy' key
-            if 'policy' in input.keys():
-                input_tensor = input['policy']
-            else:
-                input_tensor = next(iter(input.values()))
+            # For multi-head critic, we need to extract based on obs_key from each head
+            # Since all heads might use the same obs_key (e.g., "critic"), we extract once
+            pass  # Will extract per-head below
         else:
             input_tensor = input
         
@@ -78,7 +79,19 @@ class MultiHeadedMLP(nn.Module):
         outs = []
 
         for key, model in self.input_models.items():
-            # Handle different tensor dimensions
+            # Extract tensor based on this head's obs_key
+            if isinstance(input, dict) or hasattr(input, 'keys'):
+                obs_key = self.obs_key_map[key]
+                if obs_key in input.keys():
+                    input_tensor = input[obs_key]
+                elif 'policy' in input.keys():
+                    input_tensor = input['policy']
+                else:
+                    input_tensor = next(iter(input.values()))
+            else:
+                input_tensor = input
+            
+            # Handle different tensor dimensions and slice using head name (key)
             if input_tensor.ndim == 1:
                 sliced = input_tensor[self.obs_slice[key]]
             elif input_tensor.ndim >= 2:
@@ -88,7 +101,7 @@ class MultiHeadedMLP(nn.Module):
             
             out = model(sliced, return_norm_obs=return_norm_obs)
             if return_norm_obs:
-                out, norm_obs[f"norm_{model.config.obs_key}"] = (
+                out, norm_obs[f"norm_{model.config.obs_key}_{key}"] = (
                     out["outs"],
                     out[f"norm_{model.config.obs_key}"],
                 )

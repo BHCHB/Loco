@@ -5,23 +5,23 @@ max_iterations: 10000
 empirical_normalization: false
 
 num_obs: 45
-num_pre_obs: 45
+num_pre_obs: 238  # 45 (policy) + 3 (base_lin_vel) + 3 (projected_gravity) + 187 (height_scan: 17x11 grid)
 num_action: 12
 
 obs_groups: {} 
 
 algorithm:
   class_name: PPO
-  num_learning_epochs: 8
+  num_learning_epochs: 5  # Reduced from 8 to prevent overfitting
   num_mini_batches: 4
-  learning_rate: 0.0008
+  learning_rate: 0.0003  # Reduced from 0.0008 to stabilize critic
   schedule: adaptive
   gamma: 0.99
   lam: 0.95
   entropy_coef: 0.01
-  desired_kl: 0.03
-  max_grad_norm: 1.0
-  value_loss_coef: 0.5
+  desired_kl: 0.01  # Reduced from 0.03 for more conservative updates
+  max_grad_norm: 0.5  # Reduced from 1.0 to clip gradients more aggressively
+  value_loss_coef: 1.0  # Increased from 0.5 to improve critic learning
   use_clipped_value_loss: true
   clip_param: 0.2
   normalize_advantage_per_mini_batch: false
@@ -29,19 +29,57 @@ algorithm:
   rnd_cfg: null
 
 policy:
-  class_name: ActorCriticWithTransformer
-  num_obs: ${..num_obs}
-  num_action: ${..num_action}
+  class_name: ActorCriticWithDualEmbedding
+  # Note: num_obs (45) and num_privileged_obs (238) are passed by runner as positional args
   init_noise_std: 1.0  # Initial action noise standard deviation (探索噪声)
   noise_std_type: scalar  # Type of noise std: "scalar" or "log"
+  
+  # Policy Embedding: 45 → 256 features
+  policy_embed_config:
+    _target_: Franka_RL.models.mlp.MLP_WithNorm
+    _recursive_: False
+    num_in: 45  # Policy observations
+    num_out: 256  # Policy feature dimension
+    config:
+      obs_key: policy
+      slice_start_idx: 0
+      slice_end_idx: 45
+      normalize_obs: True
+      norm_clamp_value: 5
+      layers:
+        - units: 256
+          activation: relu
+          use_layer_norm: false
+        - units: 256
+          activation: relu
+          use_layer_norm: false
+  
+  # Privileged Embedding: 193 → 256 features
+  privileged_embed_config:
+    _target_: Franka_RL.models.mlp.MLP_WithNorm
+    _recursive_: False
+    num_in: 193  # Privileged observations (base_lin_vel + projected_gravity + height_scan)
+    num_out: 256  # Privileged feature dimension
+    config:
+      obs_key: privileged
+      slice_start_idx: 0
+      slice_end_idx: 193
+      normalize_obs: True
+      norm_clamp_value: 5
+      layers:
+        - units: 256
+          activation: relu
+          use_layer_norm: false
+        - units: 256
+          activation: relu
+          use_layer_norm: false
+  
   actor_config:
     _target_: Franka_RL.models.transformer.Transformer
     _recursive_: False
-    num_out: ${..num_action}
+    num_out: ${...num_action}
     config:
       transformer_token_size: ${.latent_dim}
-      # latent_dim: 512
-      # ff_size: 1024
       latent_dim: 256
       ff_size: 512
       num_layers: 4
@@ -67,31 +105,26 @@ policy:
       # 设为 false 时，退回到单步处理（用于调试或对比）
       enable_sequence_caching: true
 
+      # Note: Transformer now receives 256-dim policy features from policy_embed
+      # Use identity mapping since embedding is done outside
       input_models:
-        obs_mlp:
-          _target_: Franka_RL.models.mlp.MLP_WithNorm
+        policy_features:
+          _target_: Franka_RL.models.common.Flatten
           _recursive_: False
-          num_in: ${.....num_obs}
-          num_out: ${...transformer_token_size}
+          num_in: 256  # Policy features from policy_embed
+          num_out: ${.num_in}
           config:
-            mask_key: null
-            obs_key: self_obs
+            obs_key: policy_features
             slice_start_idx: 0
-            slice_end_idx: 45
-            normalize_obs: True
+            slice_end_idx: 256
+            normalize_obs: False  # Already normalized in policy_embed
             norm_clamp_value: 5
-            layers:
-              - units: 256
-                activation: relu
-                use_layer_norm: false
-              - units: 256
-                activation: relu
-                use_layer_norm: false
+      
       output_model:
         _target_: Franka_RL.models.mlp.MLP
         _recursive_: False
-        num_in: ${..transformer_token_size}
-        num_out: ${....num_action}
+        num_in: ${..transformer_token_size}  # 256
+        num_out: ${.....num_action}  # 12 (需要5个点因为嵌套更深)
         config:
           layers:
             - units: 1024
@@ -104,35 +137,23 @@ policy:
               activation: relu
               use_layer_norm: false
 
+  # Critic: Takes concatenated features (policy_features + privileged_features = 256 + 256 = 512)
   critic_config:
-    _target_: Franka_RL.models.mlp.MultiHeadedMLP
+    _target_: Franka_RL.models.mlp.MLP
     _recursive_: False
+    num_in: 512  # 256 (policy features) + 256 (privileged features)
     num_out: 1
     config:
-      input_models:
-        self_obs:
-          _target_: Franka_RL.models.common.Flatten
-          _recursive_: False
-          num_in: ${......num_pre_obs}
-          num_out: ${.num_in}
-          config:
-            obs_key: self_obs
-            slice_start_idx: 0
-            slice_end_idx: 45
-            normalize_obs: True
-            norm_clamp_value: 5
-      trunk:
-        _target_: Franka_RL.models.mlp.MLP
-        _recursive_: False
-        num_out: 1
-        config:
-          layers:
-            - units: 1024
-              activation: relu
-              use_layer_norm: false
-            - units: 512
-              activation: relu
-              use_layer_norm: false
+      layers:
+        - units: 256  # Reduced from 512 to prevent overparameterization
+          activation: relu
+          use_layer_norm: true  # Added layer norm for stability
+        - units: 256  # Reduced from 512
+          activation: relu
+          use_layer_norm: true  # Added layer norm for stability
+        - units: 128  # Reduced from 256
+          activation: relu
+          use_layer_norm: false
 
 clip_actions: null
 save_interval: 100
