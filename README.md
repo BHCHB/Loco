@@ -1,8 +1,8 @@
-# RL for Dexhand & Arm Manipulation
+# RL for Quadrupedal Locomotion
 
 ## Overview
 
-This repository provides RL framework for Dexhand and robotics arm manipulation tasks. It allows you to train your agent to complete diverse Human-Object Interection(HOI) tasks by imitating demo trajectories.
+This repository provides RL framework for Quadrupedal Locomotion tasks. 
 
 ## Installation
 
@@ -41,14 +41,13 @@ This repository provides RL framework for Dexhand and robotics arm manipulation 
 
     | Category | Robot Model | Config File Path | Branch |
     |------|------|------|------|
-    | Dexhand | Shadow Hand | source/Franka_RL/Franka_RL/robots/Shadow.py | origin/master|
+    | QuadrupedRobotFactory | Go2 | source/Franka_RL/Franka_RL/robots/Go2.py | origin/master|
 
     For instance, the dexhand models can be loaded into environments through `DexHandFactory` class:
     ```python
-    from Franka_RL.robots import DexHandFactory
-    robot = DexHandFactory.create_hand(
-        dexhand_type=your_dexhand_name, 
-        side=your_dexhand_side
+    from Franka_RL.robots import QuadrupedRobotFactory
+    robot = QuadrupedRobotFactory.create_robot(
+        robot_type=your_robot_name, 
     )
     ```
  - To customize your own robot models, please refer to the examples in `source/Franka_RL/Franka_RL/robots`. Follow these steps: 
@@ -71,7 +70,7 @@ This repository provides RL framework for Dexhand and robotics arm manipulation 
 
     | Task Name | Task Path | Task Description|
     |-------|--------|----|
-    | Franka-Train | source/Franka_RL/Franka_RL/tasks/direct/franka_rl | Train a Franka Panda Arm following end effector trajectories|
+    | Franka-Train | source/Franka_RL/Franka_RL/tasks/direct/go2_rl | 
 ## Troubleshooting
 
 ### Pylance Missing Indexing of Extensions
