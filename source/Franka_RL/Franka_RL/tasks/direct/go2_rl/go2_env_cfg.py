@@ -54,6 +54,9 @@ def get_robot_cfg() -> ArticulationCfg:
         ),
         init_state=go2_robot.init_state,
         actuators=go2_robot.actuators,
+        # ✅ Soft joint limits: Restrict joint motion to 95% of URDF limits
+        # This prevents joints from hitting hard limits and causing instability
+        soft_joint_pos_limit_factor=go2_robot.soft_joint_pos_limit_factor,
     )
     return robot_cfg
 
@@ -199,13 +202,10 @@ class Go2EnvCfg(DirectRLEnvCfg):
     }
     
     termination_cfg = {
-        "base_height_min": 0.1,
-        "base_height_max": 3.0,
-        "roll_pitch_max": 1.0,  
+        "base_height_min": 0.01,  # Minimum height above terrain (meters)
+        "base_height_max": 5.0,   # Maximum height above terrain (meters)
+        "roll_pitch_max": 1.0,    # Maximum roll/pitch angle (radians)
     }
-    
-    # termination 
-    termination_height = 0.15
     
     # LocoFormer-style Reward Weights
     reward_weights = {

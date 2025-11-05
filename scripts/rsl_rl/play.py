@@ -77,9 +77,11 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import Franka_RL.tasks  # noqa: F401
-from Franka_RL.runners import OnPolicyRunnerWithTransformer
+from Franka_RL.runners import OnPolicyRunnerWithTransformer, OnPolicyRunner
 from Franka_RL.runners.actor_critic_with_transformer import ActorCriticWithTransformer
 from Franka_RL.runners.actor_critic_shared_transformer import ActorCriticSharedTransformer
+from Franka_RL.runners.actor_critic_dual_mlp import ActorCriticDualMLP
+from Franka_RL.runners.actor_critic_dual_embedding import ActorCriticWithDualEmbedding
 
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlOnPolicyRunnerCfg):
@@ -150,8 +152,28 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     
-    # load trained model
-    ppo_runner = OnPolicyRunnerWithTransformer(env, agent_cfg, log_dir=None, device=get_cfg(agent_cfg, "device"))
+    # ========== Dynamic Runner Selection (same as train_new.py) ==========
+    # Read runner class name from YAML config
+    runner_class_name = get_cfg(agent_cfg, "runner", {})
+    if isinstance(runner_class_name, dict):
+        runner_class_name = runner_class_name.get("class_name", "OnPolicyRunnerWithTransformer")
+    elif hasattr(runner_class_name, "class_name"):
+        runner_class_name = runner_class_name.class_name
+    else:
+        # Fallback: if runner is not specified, default to Transformer
+        runner_class_name = "OnPolicyRunnerWithTransformer"
+    
+    # Runner classes mapping
+    runner_classes = {
+        "OnPolicyRunnerWithTransformer": OnPolicyRunnerWithTransformer,
+        "OnPolicyRunner": OnPolicyRunner,
+    }
+    
+    RunnerClass = runner_classes.get(runner_class_name, OnPolicyRunnerWithTransformer)
+    print(f"[INFO] Using runner: {runner_class_name}")
+    
+    # load trained model with dynamically selected runner
+    ppo_runner = RunnerClass(env, agent_cfg, log_dir=None, device=get_cfg(agent_cfg, "device"))
     ppo_runner.load(resume_path)
 
     # get trained policy for inference

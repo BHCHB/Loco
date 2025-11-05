@@ -19,10 +19,11 @@ class PPOWithDictObs(PPO):
             obs_dict: Observation dictionary {"policy": tensor, "critic": tensor, ...}
             actions_shape: Action shape (tensor or tuple)
         """
-        if isinstance(actions_shape, torch.Tensor):
-            actions_shape_tuple = tuple(actions_shape.shape)
-        elif isinstance(actions_shape, int):
+        # Handle actions_shape - convert to tuple
+        if isinstance(actions_shape, int):
             actions_shape_tuple = (actions_shape,)
+        elif isinstance(actions_shape, torch.Tensor):
+            actions_shape_tuple = tuple(actions_shape.shape)
         elif isinstance(actions_shape, (tuple, list)):
             actions_shape_tuple = tuple(actions_shape)
         else:

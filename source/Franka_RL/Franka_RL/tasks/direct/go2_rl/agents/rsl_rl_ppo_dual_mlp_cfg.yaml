@@ -1,0 +1,134 @@
+seed: 42
+device: cuda:0
+num_steps_per_env: 24
+max_iterations: 10000
+empirical_normalization: false
+
+num_obs: 45  # Policy observations
+num_pre_obs: 238  # 45 (policy) + 193 (privileged: 3 lin_vel + 3 gravity + 187 height_scan)
+num_action: 12
+
+obs_groups: {}
+
+# ========== Action Noise Decay Configuration ==========
+init_noise_std: 1.0          # Initial action noise std (exploration phase)
+min_noise_std: 0.1           # Minimum action noise std (exploitation phase)
+noise_decay_iterations: 5000 # Number of iterations to decay from init to min
+
+# Runner configuration
+runner:
+  class_name: OnPolicyRunner  # Use standard MLP runner 
+
+algorithm:
+  class_name: PPO
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  learning_rate: 0.001  # Reduced from 0.003 due to high value loss
+  schedule: adaptive
+  gamma: 0.99
+  lam: 0.95
+  entropy_coef: 0.01
+  desired_kl: 0.01
+  max_grad_norm: 1.0
+  value_loss_coef: 2.0
+  use_clipped_value_loss: true
+  clip_param: 0.2
+  normalize_advantage_per_mini_batch: false
+  symmetry_cfg: null
+  rnd_cfg: null
+
+policy:
+  class_name: ActorCriticDualMLP  # Simple MLP-based architecture (no Transformer)
+  init_noise_std: 1.0
+  noise_std_type: scalar
+  
+  # Policy Embedding MLP: 45 → 256
+  # This processes only the observations the robot can measure in deployment
+  policy_embed_config:
+    _target_: Franka_RL.models.mlp.MLP_WithNorm
+    _recursive_: False
+    num_in: 45  # Policy observations (ang_vel + rpy + commands + joint_pos + joint_vel + actions)
+    num_out: 256  # Feature dimension
+    config:
+      obs_key: policy
+      slice_start_idx: 0
+      slice_end_idx: 45
+      normalize_obs: True  # Apply RunningMeanStd normalization
+      norm_clamp_value: 5.0
+      layers:
+        - units: 256
+          activation: elu
+          use_layer_norm: false
+        - units: 128
+          activation: elu
+          use_layer_norm: false
+  
+  # Privileged Embedding MLP: 193 → 256
+  # This processes privileged information (only available during training)
+  privileged_embed_config:
+    _target_: Franka_RL.models.mlp.MLP_WithNorm
+    _recursive_: False
+    num_in: 193  # Privileged observations (lin_vel + gravity + height_scan)
+    num_out: 256  # Feature dimension
+    config:
+      obs_key: privileged
+      slice_start_idx: 0
+      slice_end_idx: 193
+      normalize_obs: True  # Apply RunningMeanStd normalization
+      norm_clamp_value: 5.0
+      layers:
+        - units: 256
+          activation: elu
+          use_layer_norm: false
+        - units: 128
+          activation: elu
+          use_layer_norm: false
+  
+  # Actor MLP: 256 (policy features) → 12 (actions)
+  # Only depends on policy features, can be deployed
+  actor_config:
+    _target_: Franka_RL.models.mlp.MLP
+    _recursive_: False
+    num_in: 256  # Policy features from policy_embed
+    num_out: ${...num_action}  # 12 actions
+    config:
+      layers:
+        - units: 256
+          activation: elu
+          use_layer_norm: false
+        - units: 128
+          activation: elu
+          use_layer_norm: false
+        - units: 64
+          activation: elu
+          use_layer_norm: false
+  
+  # Critic MLP: 512 (policy + privileged features) → 1 (value)
+  # Uses complete information during training
+  critic_config:
+    _target_: Franka_RL.models.mlp.MLP
+    _recursive_: False
+    num_in: 512  # 256 (policy) + 256 (privileged)
+    num_out: 1
+    config:
+      layers:
+        - units: 256
+          activation: elu
+          use_layer_norm: false
+        - units: 128
+          activation: elu
+          use_layer_norm: false
+        - units: 64
+          activation: elu
+          use_layer_norm: false
+
+clip_actions: null
+save_interval: 100
+experiment_name: Go2_DualMLP
+run_name: ''
+logger: tensorboard
+neptune_project: isaaclab
+wandb_project: isaaclab
+resume: false
+load_run: .*
+load_checkpoint: model_.*.pt

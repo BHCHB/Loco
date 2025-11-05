@@ -155,10 +155,14 @@ class Go2Env(DirectRLEnv):
         return super().step(action)
             
     def _pre_physics_step(self, actions: torch.Tensor):
-        """Pre-process actions before the physics step."""
+        """Pre-process actions before the physics step with safety checks."""
         if self._joint_dof_idx is None:
             self._initialize_indices()
 
+        # Safety: Ensure actions are clipped to [-1, 1]
+        # This is a redundant check in case the policy doesn't clip properly
+        actions = torch.clamp(actions, -1.0, 1.0)
+        
         # Store raw actions for action rate calculation
         self.last_raw_actions = self.raw_actions.clone()
         self.raw_actions = actions.clone()
@@ -168,6 +172,19 @@ class Go2Env(DirectRLEnv):
         
         # Compute joint position targets
         joint_pos_target = self.dof_pos + actions * self.action_scale
+        
+        # Safety: Clip joint targets to reasonable range around default position
+        # Prevent joints from going too far from safe operating range
+        if self.default_joint_pos is not None:
+            joint_range = 1.5  # Maximum deviation from default (radians)
+            joint_lower_limit = self.default_joint_pos - joint_range
+            joint_upper_limit = self.default_joint_pos + joint_range
+            joint_pos_target = torch.clamp(
+                joint_pos_target,
+                min=joint_lower_limit.unsqueeze(0),
+                max=joint_upper_limit.unsqueeze(0)
+            )
+        
         self.actions = joint_pos_target
 
     def _apply_action(self):
@@ -454,9 +471,12 @@ class Go2Env(DirectRLEnv):
         # Base checks 
         base_contact = self._check_illegal_contact_by_name(["base"], threshold=5.0)
         
-        # Height bounds
+        # Height bounds (use config values)
         relative_height = self.base_pos[:, 2] - self.scene.env_origins[:, 2]
-        out_of_bounds = (relative_height < 0.01) | (relative_height > 5.0)
+        out_of_bounds = (
+            (relative_height < self.cfg.termination_cfg["base_height_min"]) | 
+            (relative_height > self.cfg.termination_cfg["base_height_max"])
+        )
         
         terminated = base_contact | out_of_bounds
         

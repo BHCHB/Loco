@@ -98,7 +98,7 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import Franka_RL.tasks  # noqa: F401
-from Franka_RL.runners import OnPolicyRunnerWithTransformer
+from Franka_RL.runners import OnPolicyRunnerWithTransformer, OnPolicyRunner
 from Franka_RL.runners.actor_critic_shared_transformer import ActorCriticSharedTransformer  # Shared Transformer architecture
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -179,9 +179,29 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg["clip_actions"])
 
-    # create runner from rsl-rl
+    # create runner from rsl-rl - dynamically select runner class from config
     agent_cfg_copy = deepcopy(agent_cfg)
-    runner = OnPolicyRunnerWithTransformer(env, agent_cfg_copy, log_dir=log_dir, device=agent_cfg["device"])
+    
+    # Get runner class name from config, default to OnPolicyRunnerWithTransformer for backward compatibility
+    runner_class_name = agent_cfg.get("runner", {}).get("class_name", "OnPolicyRunnerWithTransformer")
+    
+    # Map runner class names to actual classes
+    runner_classes = {
+        "OnPolicyRunnerWithTransformer": OnPolicyRunnerWithTransformer,
+        "OnPolicyRunner": OnPolicyRunner,
+    }
+    
+    if runner_class_name not in runner_classes:
+        raise ValueError(
+            f"Unknown runner class: {runner_class_name}. "
+            f"Available options: {list(runner_classes.keys())}"
+        )
+    
+    RunnerClass = runner_classes[runner_class_name]
+    print(f"[INFO] Using runner: {runner_class_name}")
+    print(f"[INFO] Actor-Critic class: {agent_cfg['policy']['class_name']}")
+    
+    runner = RunnerClass(env, agent_cfg_copy, log_dir=log_dir, device=agent_cfg["device"])
     # write git state to logs
     runner.add_git_repo_to_log(__file__)
     # load the checkpoint

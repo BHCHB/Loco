@@ -1,5 +1,5 @@
 import isaaclab.sim as sim_utils
-from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg,DCMotorCfg
+from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg, DCMotorCfg, DelayedPDActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
 from .base import QuadrupedRobot
@@ -80,19 +80,23 @@ class UnitreeGo2(QuadrupedRobot, ABC):
                 ".*": 0.0,
             },
         )
-
-        self.soft_joint_pos_limit_factor=0.9
+        
+        
+        self.soft_joint_pos_limit_factor = 0.95
 
         # Actuator configuration (based on Go2 specifications)
+        # ✅ Using DelayedPDActuatorCfg for realistic actuator delay simulation
+        # Delay: 4 physics steps = 4 × 0.005s = 0.02s (20ms latency)
         self.actuators = {
-            "base_legs": DCMotorCfg(
-            joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
-            effort_limit=23.5,
-            saturation_effort=23.5,
-            velocity_limit=30.0,
-            stiffness=40.0,
-            damping=1.0,
-            friction=0.0,
+            "base_legs": DelayedPDActuatorCfg(
+                joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
+                effort_limit=40.0,       # Maximum torque: ±40 N·m
+                velocity_limit=30.0,     # Maximum velocity: 30 rad/s
+                stiffness=40.0,          # PD controller Kp gain
+                damping=1.0,             # PD controller Kd gain
+                friction=0.0,            # Joint friction
+                min_delay=4,             # Minimum delay: 4 physics steps (20ms)
+                max_delay=4,             # Maximum delay: 4 physics steps (20ms)
             ),
         }
         """""

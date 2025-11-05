@@ -1,25 +1,22 @@
 """
-Actor-Critic with Dual Embedding Architecture.
+Simple Asymmetric Actor-Critic with Dual MLP (No Transformer).
 
 Architecture:
-    Input: observations["critic"] (238 dims) = [policy_obs(45) + privileged_obs(193)]
-           ↓
-    Manual slice separation
-    ↙                          ↘
-policy_obs[0:45]           privileged_obs[45:238]
-    ↓                              ↓
-Policy Embedding MLP          Privileged Embedding MLP
-(45 → policy_feature_dim)     (193 → priv_feature_dim)
-    ↓                              ↓
-policy_features               priv_features
-    ↓                              ↘
-Transformer                         ↘
-    ↓                                ↘
-Actor Output                  concat(policy + priv features)
-                                     ↓
-                                 Critic MLP
-                                     ↓
-                                  Value
+    Policy Obs (45 dims) → Policy MLP → Actor MLP → Actions (12 dims)
+                             ↓
+                         policy_features
+                             ↓
+                          concat(512)
+                             ↓
+    Privileged Obs (193 dims) → Privileged MLP → priv_features
+                                                       ↓
+                                                   Critic MLP → Value (1 dim)
+
+Key Features:
+- Actor only uses policy observations (45 dims)
+- Critic uses both policy and privileged observations
+- No Transformer, pure MLP architecture
+- Suitable for deployment (actor is independent)
 """
 
 from __future__ import annotations
@@ -30,19 +27,19 @@ from torch.distributions import Normal
 from hydra.utils import instantiate
 
 
-class ActorCriticWithDualEmbedding(nn.Module):
-    """Actor-Critic with separate embedding MLPs for policy and privileged observations."""
+class ActorCriticDualMLP(nn.Module):
+    """Simple Asymmetric Actor-Critic with separate MLPs for policy and privileged observations."""
     
     is_recurrent = False
     
     def __init__(
         self,
-        num_obs,                # 45 (policy obs) - matches runner's first arg
-        num_privileged_obs,     # 238 (policy + privileged obs) - matches runner's second arg
+        num_obs,                # 45 (policy obs)
+        num_privileged_obs,     # 238 (policy + privileged obs)
         num_actions,            # 12
         policy_embed_config,    # Policy embedding MLP config (45 → feature_dim)
         privileged_embed_config,  # Privileged embedding MLP config (193 → feature_dim)
-        actor_config,           # Actor (Transformer) config
+        actor_config,           # Actor MLP config
         critic_config,          # Critic MLP config
         init_noise_std=1.0,
         noise_std_type: str = "scalar",
@@ -50,31 +47,31 @@ class ActorCriticWithDualEmbedding(nn.Module):
     ):
         if kwargs:
             print(
-                "ActorCriticWithDualEmbedding.__init__ got unexpected arguments: "
+                "ActorCriticDualMLP.__init__ got unexpected arguments: "
                 + str(list(kwargs.keys()))
             )
         super().__init__()
         
-        # Store dimensions (use standard naming internally)
+        # Store dimensions
         self.num_actor_obs = num_obs  # 45
         self.num_critic_obs = num_privileged_obs  # 238
         self.num_privileged_obs = num_privileged_obs - num_obs  # 193
         
-        # Policy embedding: 45 → feature_dim
+        # Policy embedding: 45 → feature_dim (e.g., 256)
         self.policy_embed = instantiate(policy_embed_config)
-        print(f"Policy Embedding: {self.policy_embed}")
+        print(f"Policy Embedding MLP: {self.policy_embed}")
         
-        # Privileged embedding: 193 → feature_dim  
+        # Privileged embedding: 193 → feature_dim (e.g., 256)
         self.privileged_embed = instantiate(privileged_embed_config)
-        print(f"Privileged Embedding: {self.privileged_embed}")
+        print(f"Privileged Embedding MLP: {self.privileged_embed}")
         
-        # Actor (Transformer): takes policy features
+        # Actor MLP: takes policy features
         self.actor = instantiate(actor_config)
-        print(f"Actor: {self.actor}")
+        print(f"Actor MLP: {self.actor}")
         
-        # Critic: takes concatenated features (policy + privileged)
+        # Critic MLP: takes concatenated features (policy + privileged)
         self.critic = instantiate(critic_config)
-        print(f"Critic: {self.critic}")
+        print(f"Critic MLP: {self.critic}")
         
         # Action noise
         self.noise_std_type = noise_std_type
@@ -90,16 +87,22 @@ class ActorCriticWithDualEmbedding(nn.Module):
         Normal.set_default_validate_args(False)
     
     def reset(self, dones=None):
-        """Reset sequence cache for Transformer."""
-        if hasattr(self.actor, 'reset'):
-            self.actor.reset(dones)
+        """Reset (no-op for MLP, kept for compatibility)."""
+        pass
+    
+    def reset_noise_std(self, noise_std: float):
+        """Manually update action noise std for exploration schedule.
+        
+        Args:
+            noise_std: New standard deviation value (typically decaying from 1.0 to 0.1)
+        """
+        self.std.data.fill_(noise_std)
     
     def update_normalization(self, obs):
         """Update observation normalization.
         
-        This method is called by PPO.process_env_step() to update the normalizers.
-        Since we handle normalization inside the embedding MLPs (RunningMeanStd),
-        this is a no-op at the policy level.
+        Normalization is handled inside the embedding MLPs (RunningMeanStd),
+        so this is a no-op at the policy level.
         """
         pass
     
@@ -186,11 +189,8 @@ class ActorCriticWithDualEmbedding(nn.Module):
         # Embed policy observations
         policy_features = self.policy_embed(policy_obs)
         
-        # Wrap features in dict for Transformer
-        features_dict = {"policy_features": policy_features}
-        
-        # Get action mean from actor (Transformer)
-        mean = self.actor(features_dict)
+        # Get action mean from actor MLP
+        mean = self.actor(policy_features)
         
         # Compute standard deviation with protection against negative values
         if self.noise_std_type == "scalar":
@@ -222,9 +222,7 @@ class ActorCriticWithDualEmbedding(nn.Module):
         """Deterministic action for inference with clipping."""
         policy_obs, _ = self._extract_observations(observations)
         policy_features = self.policy_embed(policy_obs)
-        # Wrap features in dict for Transformer
-        features_dict = {"policy_features": policy_features}
-        actions_mean = self.actor(features_dict)
+        actions_mean = self.actor(policy_features)
         # ✅ Clip actions to [-1, 1] for safe deployment
         clipped_actions = torch.clamp(actions_mean, -1.0, 1.0)
         return clipped_actions
@@ -256,46 +254,65 @@ class ActorCriticWithDualEmbedding(nn.Module):
         return value
     
     def load_state_dict(self, state_dict, strict=True):
-        """Load model parameters and buffers including RunningMeanStd statistics.
+        """Load model parameters with architecture compatibility checking."""
         
-        This method handles the special case where RunningMeanStd buffers (mean, var, count)
-        might not be initialized yet when loading from a checkpoint. These buffers are
-        lazily initialized on first forward pass, so we need to be flexible about loading them.
-        """
-        # Filter out RunningMeanStd buffer keys that might not exist yet
-        # These buffers are registered in RunningMeanStd but are lazily initialized
+        # Check architecture compatibility
+        checkpoint_has_old_actor = any('actor.0.weight' in k or 'actor.mlp.' in k for k in state_dict.keys())
+        checkpoint_has_transformer = any('actor.seqTransEncoder' in k for k in state_dict.keys())
+        model_has_mlp_actor = hasattr(self.actor, 'mlp') or isinstance(self.actor, nn.Sequential)
+        
+        # Detect architecture mismatch
+        if checkpoint_has_transformer and not model_has_mlp_actor:
+            print("\n" + "="*80)
+            print("[WARNING] Architecture Mismatch Detected!")
+            print("="*80)
+            print("Checkpoint architecture: Transformer-based ActorCritic")
+            print("Current model architecture: MLP-based ActorCritic")
+            print("\nThese architectures are incompatible. Options:")
+            print("  1. Train a new model from scratch with MLP architecture")
+            print("  2. Switch back to Transformer architecture to use this checkpoint")
+            print("\n[INFO] Skipping checkpoint loading - model will use random initialization")
+            print("="*80 + "\n")
+            return False
+        
+        # Filter out RunningMeanStd buffer keys
         running_mean_std_patterns = [
             'running_obs_norm.mean', 
             'running_obs_norm.var', 
             'running_obs_norm.count'
         ]
         
-        # Separate RMS buffers from other state dict items
         rms_state = {}
         model_state = {}
+        unexpected_filtered = []
+        
         for key, value in state_dict.items():
             if any(pattern in key for pattern in running_mean_std_patterns):
                 rms_state[key] = value
+            # Filter out transformer keys if loading into MLP
+            elif checkpoint_has_transformer and ('seqTransEncoder' in key or 'sequence_pos_encoder' in key):
+                unexpected_filtered.append(key)
+                continue
             else:
                 model_state[key] = value
         
-        # Load model parameters (excluding RMS buffers)
+        if unexpected_filtered:
+            print(f"[INFO] Filtered out {len(unexpected_filtered)} keys from Transformer architecture")
+        
+        # Load model parameters
         missing_keys, unexpected_keys = super().load_state_dict(model_state, strict=False)
         
-        # Try to load RMS buffers if they exist in the model
+        # Try to load RMS buffers if they exist
         rms_loaded = []
         rms_skipped = []
         for key, value in rms_state.items():
             try:
-                # Navigate to the nested attribute
                 parts = key.split('.')
                 obj = self
                 for part in parts[:-1]:
                     obj = getattr(obj, part)
                 
-                # Check if the final buffer exists
                 if hasattr(obj, parts[-1]):
-                    # Set the buffer value
                     buffer = getattr(obj, parts[-1])
                     buffer.data.copy_(value)
                     rms_loaded.append(key)
@@ -309,18 +326,20 @@ class ActorCriticWithDualEmbedding(nn.Module):
             print(f"[INFO] Loaded RunningMeanStd buffers: {len(rms_loaded)} items")
         if rms_skipped:
             print(f"[INFO] Skipped uninitialized RunningMeanStd buffers: {len(rms_skipped)} items")
-            print("[INFO] These will be re-initialized on first forward pass.")
         
-        # Check for truly unexpected keys (not RMS buffers)
+        # Check for truly unexpected keys
         if strict and len(unexpected_keys) > 0:
-            error_msg = f"Unexpected key(s) in state_dict: {', '.join(unexpected_keys)}"
-            raise RuntimeError(error_msg)
+            print(f"[WARNING] Unexpected keys in checkpoint: {len(unexpected_keys)} items")
+            if not checkpoint_has_transformer:
+                error_msg = f"Unexpected key(s) in state_dict: {', '.join(unexpected_keys[:10])}"
+                if len(unexpected_keys) > 10:
+                    error_msg += f" ... and {len(unexpected_keys) - 10} more"
+                raise RuntimeError(error_msg)
         
-        # Report missing keys if in strict mode
-        if strict and len(missing_keys) > 0:
-            print(f"[WARNING] Missing keys in checkpoint: {missing_keys}")
+        if missing_keys:
+            print(f"[INFO] Missing keys in checkpoint: {len(missing_keys)} items (will use random init)")
         
-        return False  # Not resuming distillation
+        return False
     
     def get_std(self):
         """Get current action standard deviation."""

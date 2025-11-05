@@ -117,27 +117,36 @@ class ActorCriticWithTransformer(nn.Module):
     def update_distribution(self, observations):
         # compute mean
         mean = self.actor(observations)
-        # compute standard deviation
+        # compute standard deviation with protection against negative values
         if self.noise_std_type == "scalar":
-            std = self.std.expand_as(mean)
+            # ✅ Protect against negative std values during training
+            std = torch.abs(self.std).expand_as(mean)
         elif self.noise_std_type == "log":
+            # log_std is naturally protected (exp always positive)
             std = torch.exp(self.log_std).expand_as(mean)
         else:
             raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
-        # create distribution
+        # create distribution with clamped std for numerical stability
         safe_std = torch.clamp(std, min=1e-4, max=10.0)
         self.distribution = Normal(mean, safe_std)
 
     def act(self, observations, **kwargs):
+        """Sample action from current distribution with clipping."""
         self.update_distribution(observations)
-        return self.distribution.sample()
+        actions = self.distribution.sample()
+        # ✅ Clip actions to [-1, 1]
+        clipped_actions = torch.clamp(actions, -1.0, 1.0)
+        return clipped_actions
 
     def get_actions_log_prob(self, actions):
         return self.distribution.log_prob(actions).sum(dim=-1)
 
     def act_inference(self, observations):
+        """Deterministic action for inference with clipping."""
         actions_mean = self.actor(observations)
-        return actions_mean
+        # ✅ Clip actions to [-1, 1] for safe deployment
+        clipped_actions = torch.clamp(actions_mean, -1.0, 1.0)
+        return clipped_actions
 
     def evaluate(self, critic_observations, masks=None, hidden_states=None):
         """

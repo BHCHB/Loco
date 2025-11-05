@@ -1,0 +1,94 @@
+seed: 42
+device: cuda:0
+num_steps_per_env: 24
+max_iterations: 10000
+empirical_normalization: true  # ✅ CRITICAL: Enable normalization for Simple MLP
+
+num_obs: 45  # Policy observations
+num_pre_obs: 238  # 45 (policy) + 193 (privileged: 3 lin_vel + 3 gravity + 187 height_scan)
+num_action: 12
+
+obs_groups: {}
+
+# ========== Action Noise Decay Configuration ==========
+init_noise_std: 1.0          # Initial action noise std (exploration phase)
+min_noise_std: 0.1           # Minimum action noise std (exploitation phase)
+noise_decay_iterations: 5000 # Number of iterations to decay from init to min
+
+# Runner configuration
+runner:
+  class_name: OnPolicyRunner  # Use standard MLP runner 
+
+algorithm:
+  class_name: PPO
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  learning_rate: 0.001
+  schedule: adaptive
+  gamma: 0.99
+  lam: 0.95
+  entropy_coef: 0.01
+  desired_kl: 0.01
+  max_grad_norm: 1.0
+  value_loss_coef: 1.0  # ✅ Reduced from 2.0 to standard 1.0
+  use_clipped_value_loss: true
+  clip_param: 0.2
+  normalize_advantage_per_mini_batch: false
+  symmetry_cfg: null
+  rnd_cfg: null
+
+policy:
+  class_name: ActorCriticSimpleMLP  # Simple MLP without feature extraction
+  init_noise_std: 1.0
+  noise_std_type: scalar
+  
+  # Actor MLP: 45 (raw policy obs) → 12 (actions)
+  # Directly processes raw observations without embedding
+  # ✅ Increased capacity from [256,128,64] to [512,256,128]
+  actor_config:
+    _target_: Franka_RL.models.mlp.MLP
+    _recursive_: False
+    num_in: 45  # Raw policy observations
+    num_out: ${...num_action}  # 12 actions
+    config:
+      layers:
+        - units: 512
+          activation: elu
+          use_layer_norm: false
+        - units: 256
+          activation: elu
+          use_layer_norm: false
+        - units: 128
+          activation: elu
+          use_layer_norm: false
+  
+  # Critic MLP: 238 (raw policy + privileged obs) → 1 (value)
+  # Directly processes concatenated raw observations
+  critic_config:
+    _target_: Franka_RL.models.mlp.MLP
+    _recursive_: False
+    num_in: 238  # Full critic observations (45 policy + 193 privileged)
+    num_out: 1
+    config:
+      layers:
+        - units: 512
+          activation: elu
+          use_layer_norm: false
+        - units: 256
+          activation: elu
+          use_layer_norm: false
+        - units: 128
+          activation: elu
+          use_layer_norm: false
+
+clip_actions: null
+save_interval: 50  # ✅ Increased save frequency for better checkpointing
+experiment_name: Go2_SimpleMLP
+run_name: ''
+logger: tensorboard
+neptune_project: isaaclab
+wandb_project: isaaclab
+
+resume: false
+load_run: .*
+load_checkpoint: model_.*.pt

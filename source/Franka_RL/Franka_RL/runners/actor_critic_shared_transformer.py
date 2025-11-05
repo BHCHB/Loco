@@ -219,30 +219,35 @@ class ActorCriticSharedTransformer(nn.Module):
         # 2. Pass through actor head to get action mean
         mean = self.actor_head(encoded)
         
-        # 3. Compute standard deviation
+        # 3. Compute standard deviation with protection against negative values
         if self.noise_std_type == "scalar":
-            std = self.std.expand_as(mean)
+            # ✅ Protect against negative std values during training
+            std = torch.abs(self.std).expand_as(mean)
         elif self.noise_std_type == "log":
+            # log_std is naturally protected (exp always positive)
             std = torch.exp(self.log_std).expand_as(mean)
         else:
             raise ValueError(f"Unknown std type: {self.noise_std_type}")
-        # 3.1 Clamp std for numerical stability (remove diagnostic attribute storage)
+        # 3.1 Clamp std for numerical stability
         safe_std = torch.clamp(std, min=1e-4, max=10.0)
         # 4. Create distribution
         self.distribution = Normal(mean, safe_std)
     
     def act(self, observations, **kwargs):
         """
-        Sample actions from the current policy.
+        Sample actions from the current policy with clipping.
         
         Args:
             observations: Actor observations
             
         Returns:
-            actions: Sampled actions
+            actions: Sampled actions (clipped to [-1, 1])
         """
         self.update_distribution(observations)
-        return self.distribution.sample()
+        actions = self.distribution.sample()
+        # ✅ Clip actions to [-1, 1]
+        clipped_actions = torch.clamp(actions, -1.0, 1.0)
+        return clipped_actions
     
     def get_actions_log_prob(self, actions):
         """
@@ -258,17 +263,19 @@ class ActorCriticSharedTransformer(nn.Module):
     
     def act_inference(self, observations):
         """
-        Get deterministic actions for inference (mean of distribution).
+        Get deterministic actions for inference with clipping (mean of distribution).
         
         Args:
             observations: Actor observations
             
         Returns:
-            actions_mean: Deterministic actions
+            actions_mean: Deterministic actions (clipped to [-1, 1])
         """
         encoded = self.forward_shared_encoder(observations)
         actions_mean = self.actor_head(encoded)
-        return actions_mean
+        # ✅ Clip actions to [-1, 1] for safe deployment
+        clipped_actions = torch.clamp(actions_mean, -1.0, 1.0)
+        return clipped_actions
     
     def evaluate(self, critic_observations, masks=None, hidden_states=None):
         """
