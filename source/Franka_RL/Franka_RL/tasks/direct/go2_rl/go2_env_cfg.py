@@ -195,8 +195,8 @@ class Go2EnvCfg(DirectRLEnvCfg):
             "yaw": [-3.14, 3.14],
         },
         "vel_range": {
-            "x": [-0.5, 0.5],
-            "y": [-0.5, 0.5],
+            "x": [0.0, 0.0],
+            "y": [0.0, 0.0],
             "z": [0.0, 0.0],
         },
     }
@@ -238,6 +238,33 @@ class Go2EnvCfg(DirectRLEnvCfg):
         # Constraint thresholds
         "joint_limit_margin": 0.1,          # Joint deviation margin (rad) before penalty
         "illegal_contact_threshold": 1.0,   # Contact force threshold (N) for illegal contacts
+    }
+    
+    # Random Push Disturbance Configuration
+    push_robot_cfg = {
+        "enable": True,                      # Enable random push during training
+        "interval_range_s": (10.0, 15.0),   # Random interval between pushes (seconds)
+        "velocity_range": {
+            "x": (-0.5, 0.5),               # Push velocity range in x (m/s)
+            "y": (-0.5, 0.5),               # Push velocity range in y (m/s)
+        },
+    }
+    
+    # Domain Randomization Configuration
+    domain_randomization_cfg = {
+        # Friction coefficient randomization (for ground contact)
+        "friction": {
+            "enable": True,
+            "range": (0.4, 4.0),            # Static/dynamic friction range
+            "operation": "startup",          # Apply at episode reset
+        },
+        
+        # Base mass randomization (simulates payload variations)
+        "base_mass": {
+            "enable": True,
+            "range": (-5.0, 5.0),           # Mass offset in kg (±5kg from nominal)
+            "operation": "startup",          # Apply at episode reset
+        },
     }
     
     def __post_init__(self):

@@ -58,6 +58,26 @@ class Go2Env(DirectRLEnv):
         self.raw_actions = torch.zeros(self.num_envs, 12, dtype=torch.float32, device=self.device)
         self.last_raw_actions = torch.zeros(self.num_envs, 12, dtype=torch.float32, device=self.device)
         
+        # Initialize random push system
+        self._init_random_push()
+        
+    def _init_random_push(self):
+        """Initialize random push disturbance system."""
+        push_cfg = self.cfg.push_robot_cfg
+        self.push_enabled = push_cfg["enable"]
+        self.push_interval_range = push_cfg["interval_range_s"]
+        self.push_vel_range_x = push_cfg["velocity_range"]["x"]
+        self.push_vel_range_y = push_cfg["velocity_range"]["y"]
+        
+        # Each environment has independent timer and interval
+        self.push_timer = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self.push_interval = sample_uniform(
+            self.push_interval_range[0], 
+            self.push_interval_range[1], 
+            (self.num_envs,), 
+            self.device
+        )
+        
     def _init_commands(self):
         """Initialize the velocity command system using DirectCommandHelper."""
         # Create CommandConfig from environment configuration
@@ -151,7 +171,11 @@ class Go2Env(DirectRLEnv):
 
         self.commands = self.command_helper.get_commands_with_heading()
         
-        # Continue with normal step logic   不确定新command是否成功进入obs空间
+        # Apply random push disturbances (for robustness training)
+        if self.push_enabled:
+            self._apply_random_push()
+        
+        # Continue with normal step logic
         return super().step(action)
             
     def _pre_physics_step(self, actions: torch.Tensor):
@@ -190,6 +214,64 @@ class Go2Env(DirectRLEnv):
     def _apply_action(self):
         """Apply actions to the robot."""
         self.robot.set_joint_position_target(self.actions, joint_ids=self._joint_dof_idx)
+    
+    def _apply_random_push(self):
+        """Apply random velocity disturbances to robot base.
+        
+        Each environment has an independent timer. When timer exceeds the random interval,
+        a random velocity push is applied in x/y directions, then timer resets with a new
+        random interval between 10-15 seconds.
+        
+        This simulates external disturbances (e.g., someone pushes the robot) to improve
+        robustness and prevent overfitting to perfect simulation conditions.
+        """
+        # Update timers for all environments
+        self.push_timer += self.dt
+        
+        # Find environments that should receive a push
+        push_mask = self.push_timer >= self.push_interval
+        
+        if push_mask.any():
+            num_pushes = push_mask.sum().item()
+            
+            # Generate random push velocities for selected environments
+            push_vel_x = sample_uniform(
+                self.push_vel_range_x[0], 
+                self.push_vel_range_x[1], 
+                (num_pushes,), 
+                self.device
+            )
+            push_vel_y = sample_uniform(
+                self.push_vel_range_y[0], 
+                self.push_vel_range_y[1], 
+                (num_pushes,), 
+                self.device
+            )
+            
+            # Get current root velocity and add push
+            current_root_vel = self.robot.data.root_vel_w[push_mask].clone()
+            current_root_vel[:, 0] += push_vel_x  # Add x velocity
+            current_root_vel[:, 1] += push_vel_y  # Add y velocity
+            
+            # Write modified velocity back to simulation
+            env_ids_to_push = torch.where(push_mask)[0]
+            self.robot.write_root_velocity_to_sim(current_root_vel, env_ids_to_push)
+            
+            # Reset timers for pushed environments
+            self.push_timer[push_mask] = 0.0
+            
+            # Sample new random intervals (10-15 seconds)
+            self.push_interval[push_mask] = sample_uniform(
+                self.push_interval_range[0], 
+                self.push_interval_range[1], 
+                (num_pushes,), 
+                self.device
+            )
+            
+            # Log push events (occasionally to avoid spam)
+            if self.common_step_counter % 500 == 0 and num_pushes > 0:
+                avg_push_vel = torch.sqrt(push_vel_x**2 + push_vel_y**2).mean().item()
+                print(f"[RandomPush] Step {self.common_step_counter}: Pushed {num_pushes}/{self.num_envs} envs, avg_vel={avg_push_vel:.3f} m/s")
         
     def _compute_intermediate_values(self):
         """Compute intermediate values for rewards and observations."""
@@ -317,11 +399,11 @@ class Go2Env(DirectRLEnv):
         gravity_target = torch.tensor([0.0, 0.0, -1.0], device=self.device).repeat(self.num_envs, 1)
         gravity_err_sq = torch.sum((self.projected_gravity - gravity_target) ** 2, dim=1)
         r_flat = gravity_err_sq * self.reward_weights["flat_orientation"]
-
+        """
         # Vertical velocity penalty (suppress jumping/sinking)
         lin_vel_z = self.base_lin_vel_local[:, 2]
         r_lin_vel_z = (lin_vel_z ** 2) * self.reward_weights["lin_vel_z_l2"]
-
+        """
         # Roll/pitch rate penalty (suppress body rotation)
         ang_vel_xy = self.base_ang_vel_local[:, :2]
         ang_vel_xy_sq = torch.sum(ang_vel_xy ** 2, dim=1)
@@ -373,7 +455,7 @@ class Go2Env(DirectRLEnv):
             lin_track + 
             ang_track + 
             r_flat + 
-            r_lin_vel_z + 
+            #r_lin_vel_z + 
             r_ang_vel_xy + 
             r_energy + 
             r_action_rate + 
@@ -388,7 +470,7 @@ class Go2Env(DirectRLEnv):
             "rewards/lin_track": lin_track.mean(),
             "rewards/ang_track": ang_track.mean(),
             "rewards/flat": r_flat.mean(),
-            "rewards/lin_vel_z_l2": r_lin_vel_z.mean(),
+            #"rewards/lin_vel_z_l2": r_lin_vel_z.mean(),
             "rewards/ang_vel_xy_l2": r_ang_vel_xy.mean(),
             "rewards/energy_tau_l2": r_energy.mean(),
             "rewards/action_rate_l2": r_action_rate.mean(),
@@ -580,5 +662,92 @@ class Go2Env(DirectRLEnv):
         self.raw_actions[env_ids] = 0.0
         self.last_raw_actions[env_ids] = 0.0
         
+        # Apply domain randomization
+        self._apply_domain_randomization(env_ids)
+        
+        # Reset random push timers with random initial offsets (to avoid synchronized pushes)
+        self.push_timer[env_ids] = sample_uniform(0.0, 5.0, (len(env_ids),), self.device)
+        self.push_interval[env_ids] = sample_uniform(
+            self.push_interval_range[0], 
+            self.push_interval_range[1], 
+            (len(env_ids),), 
+            self.device
+        )
+        
         # Reset episode length buffer (critical fix for DirectRLEnv)
         self.episode_length_buf[env_ids] = 0
+
+    def _apply_domain_randomization(self, env_ids: Sequence[int]):
+        """Apply domain randomization to specified environments.
+        
+        This includes:
+        - Friction coefficient randomization (for robot feet and terrain)
+        - Base mass randomization (simulating payload variations)
+        """
+        dr_cfg = self.cfg.domain_randomization_cfg
+        
+        # 1. Randomize friction coefficients
+        if dr_cfg["friction"]["enable"]:
+            friction_range = dr_cfg["friction"]["range"]
+            friction_values = sample_uniform(
+                friction_range[0], 
+                friction_range[1], 
+                (len(env_ids),), 
+                self.device
+            )
+            
+            # Get material properties for robot (all bodies including feet)
+            # Shape: (num_envs, num_bodies, 3) where 3 = [static_friction, dynamic_friction, restitution]
+            materials = self.robot.root_physx_view.get_material_properties()
+            
+            # Apply randomized friction to all bodies of reset environments
+            # Set both static and dynamic friction to the same value
+            materials[env_ids, :, 0] = friction_values.unsqueeze(1)  # Static friction
+            materials[env_ids, :, 1] = friction_values.unsqueeze(1)  # Dynamic friction
+            
+            # Write back to simulation
+            # Note: PhysX API requires CPU tensor for env_ids
+            env_ids_cpu = torch.tensor(env_ids, dtype=torch.long, device="cpu")
+            self.robot.root_physx_view.set_material_properties(materials, env_ids_cpu)
+            
+        # 2. Randomize base mass (simulate payload variations)
+        if dr_cfg["base_mass"]["enable"]:
+            mass_range = dr_cfg["base_mass"]["range"]
+            mass_offsets = sample_uniform(
+                mass_range[0], 
+                mass_range[1], 
+                (len(env_ids),), 
+                self.device
+            )
+            
+            # Get current masses for all bodies
+            # Shape: (num_envs, num_bodies)
+            masses = self.robot.root_physx_view.get_masses()
+            
+            # Apply mass offset only to base body (index 0)
+            # Note: Keep original masses for other bodies (legs, feet, etc.)
+            default_base_mass = self.robot.data.default_mass[:, self._base_idx[0]]
+            masses[env_ids, self._base_idx[0]] = default_base_mass[env_ids] + mass_offsets
+            
+            # Clamp to reasonable range (avoid negative or extremely high masses)
+            masses[env_ids, self._base_idx[0]] = torch.clamp(
+                masses[env_ids, self._base_idx[0]], 
+                min=1.0,   # Minimum 1kg for base
+                max=30.0   # Maximum 30kg for base (Go2 base is ~12kg, so ±5kg is safe)
+            )
+            
+            # Write back to simulation
+            env_ids_cpu = torch.tensor(env_ids, dtype=torch.long, device="cpu")
+            self.robot.root_physx_view.set_masses(masses, env_ids_cpu)
+            
+        # Log domain randomization values (only for first reset to avoid spam)
+        if self.common_step_counter == 0 and 0 in env_ids:
+            log_msg = "[Domain Randomization] Applied to env_0:"
+            if dr_cfg["friction"]["enable"]:
+                env0_idx = list(env_ids).index(0)
+                log_msg += f" friction={friction_values[env0_idx].item():.3f}"
+            if dr_cfg["base_mass"]["enable"]:
+                env0_idx = list(env_ids).index(0)
+                final_mass = masses[0, self._base_idx[0]].item()
+                log_msg += f" base_mass={final_mass:.2f}kg (offset={mass_offsets[env0_idx].item():+.2f}kg)"
+            print(log_msg)
