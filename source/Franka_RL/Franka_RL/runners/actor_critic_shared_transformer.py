@@ -90,11 +90,12 @@ class ActorCriticSharedTransformer(nn.Module):
         self.critic_head = instantiate(critic_head_config)
         print(f"  ✓ Critic Head: {encoder_output_dim} → 1")
         
-        # ========== Action Noise ==========
+        # ========== Action Noise (use log_std for numerical stability) ==========
         self.noise_std_type = noise_std_type
         if self.noise_std_type == "scalar":
-            self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
-            print(f"\n[Action Noise] Scalar std initialized to {init_noise_std}")
+            # Legacy scalar parameterization (convert to log internally for stability)
+            self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
+            print(f"\n[Action Noise] Converting scalar to log_std (init={init_noise_std})")
         elif self.noise_std_type == "log":
             self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
             print(f"\n[Action Noise] Log std initialized to log({init_noise_std})")
@@ -118,10 +119,8 @@ class ActorCriticSharedTransformer(nn.Module):
         actor_params = sum(p.numel() for p in self.actor_head.parameters())
         critic_params = sum(p.numel() for p in self.critic_head.parameters())
         
-        # Count std/log_std parameters
-        if hasattr(self, 'std'):
-            noise_params = self.std.numel()
-        elif hasattr(self, 'log_std'):
+        # Count log_std parameters (unified parameterization)
+        if hasattr(self, 'log_std'):
             noise_params = self.log_std.numel()
         else:
             noise_params = 0
@@ -219,17 +218,14 @@ class ActorCriticSharedTransformer(nn.Module):
         # 2. Pass through actor head to get action mean
         mean = self.actor_head(encoded)
         
-        # 3. Compute standard deviation with protection against negative values
-        if self.noise_std_type == "scalar":
-            # ✅ Protect against negative std values during training
-            std = torch.abs(self.std).expand_as(mean)
-        elif self.noise_std_type == "log":
-            # log_std is naturally protected (exp always positive)
-            std = torch.exp(self.log_std).expand_as(mean)
-        else:
-            raise ValueError(f"Unknown std type: {self.noise_std_type}")
-        # 3.1 Clamp std for numerical stability
-        safe_std = torch.clamp(std, min=1e-4, max=10.0)
+        # 3. ✅ Compute standard deviation using log parameterization + clamp
+        # log_std ∈ [-20, 2] → std ∈ [2e-9, 7.4]
+        log_std_clamped = torch.clamp(self.log_std, min=-20.0, max=2.0)
+        std = torch.exp(log_std_clamped).expand_as(mean)
+        
+        # 3.1 Additional safety clamp for distribution creation
+        safe_std = torch.clamp(std, min=1e-6, max=10.0)
+        
         # 4. Create distribution
         self.distribution = Normal(mean, safe_std)
     
@@ -310,11 +306,21 @@ class ActorCriticSharedTransformer(nn.Module):
     
     def load_state_dict(self, state_dict, strict=True):
         """
-        Load state dict with compatibility for different architectures.
+        Load state dict with std conversion and compatibility for different architectures.
         
         This allows loading checkpoints from separate actor-critic models
         by mapping parameters appropriately.
         """
+        # ✅ Convert old scalar std to log_std if needed
+        if 'std' in state_dict and 'log_std' not in state_dict:
+            print("[INFO] Converting legacy 'std' parameter to 'log_std'")
+            std_value = state_dict.pop('std')  # Remove old 'std'
+            # Clamp std to valid range before taking log
+            std_value = torch.clamp(std_value, min=1e-6, max=10.0)
+            state_dict['log_std'] = torch.log(std_value)  # Add new 'log_std'
+            print(f"  std range: [{std_value.min().item():.6f}, {std_value.max().item():.6f}]")
+            print(f"  log_std range: [{state_dict['log_std'].min().item():.6f}, {state_dict['log_std'].max().item():.6f}]")
+        
         try:
             # Try direct loading first
             super().load_state_dict(state_dict, strict=strict)

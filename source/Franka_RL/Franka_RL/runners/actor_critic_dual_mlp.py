@@ -73,10 +73,12 @@ class ActorCriticDualMLP(nn.Module):
         self.critic = instantiate(critic_config)
         print(f"Critic MLP: {self.critic}")
         
-        # Action noise
+        # Action noise (use log_std for better numerical stability)
         self.noise_std_type = noise_std_type
         if self.noise_std_type == "scalar":
-            self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
+            # Legacy scalar parameterization (convert to log internally for stability)
+            self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
+            print(f"[INFO] Converting scalar std to log_std parameterization for numerical stability")
         elif self.noise_std_type == "log":
             self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
         else:
@@ -91,12 +93,8 @@ class ActorCriticDualMLP(nn.Module):
         pass
     
     def reset_noise_std(self, noise_std: float):
-        """Manually update action noise std for exploration schedule.
-        
-        Args:
-            noise_std: New standard deviation value (typically decaying from 1.0 to 0.1)
-        """
-        self.std.data.fill_(noise_std)
+        """Manually update action noise std for exploration schedule."""
+        self.log_std.data.fill_(torch.log(torch.tensor(noise_std)))
     
     def update_normalization(self, obs):
         """Update observation normalization.
@@ -191,26 +189,19 @@ class ActorCriticDualMLP(nn.Module):
         
         # Get action mean from actor MLP
         mean = self.actor(policy_features)
+    
+        # log_std ∈ [-20, 2] → std ∈ [2e-9, 7.4]
+        log_std_clamped = torch.clamp(self.log_std, min=-20.0, max=2.0)
+        std = torch.exp(log_std_clamped).expand_as(mean)
         
-        # Compute standard deviation with protection against negative values
-        if self.noise_std_type == "scalar":
-            # ✅ Protect against negative std values during training
-            std = torch.abs(self.std).expand_as(mean)
-        elif self.noise_std_type == "log":
-            # log_std is naturally protected (exp always positive)
-            std = torch.exp(self.log_std).expand_as(mean)
-        else:
-            raise ValueError(f"Unknown std type: {self.noise_std_type}")
-        
-        # Create distribution with clamped std for numerical stability
-        safe_std = torch.clamp(std, min=1e-4, max=10.0)
+        # Additional safety clamp for distribution creation
+        safe_std = torch.clamp(std, min=1e-6, max=10.0)
         self.distribution = Normal(mean, safe_std)
     
     def act(self, observations, **kwargs):
         """Sample action from current distribution with clipping."""
         self.update_distribution(observations)
         actions = self.distribution.sample()
-        # ✅ Clip actions to [-1, 1]
         clipped_actions = torch.clamp(actions, -1.0, 1.0)
         return clipped_actions
     
@@ -223,7 +214,6 @@ class ActorCriticDualMLP(nn.Module):
         policy_obs, _ = self._extract_observations(observations)
         policy_features = self.policy_embed(policy_obs)
         actions_mean = self.actor(policy_features)
-        # ✅ Clip actions to [-1, 1] for safe deployment
         clipped_actions = torch.clamp(actions_mean, -1.0, 1.0)
         return clipped_actions
     
@@ -254,26 +244,23 @@ class ActorCriticDualMLP(nn.Module):
         return value
     
     def load_state_dict(self, state_dict, strict=True):
-        """Load model parameters with architecture compatibility checking."""
+        """Load model parameters with architecture compatibility checking and std conversion."""
+        
+
+        if 'std' in state_dict and 'log_std' not in state_dict:
+            print("[INFO] Converting legacy 'std' parameter to 'log_std'")
+            std_value = state_dict.pop('std')  # Remove old 'std'
+            # Clamp std to valid range before taking log
+            std_value = torch.clamp(std_value, min=1e-6, max=10.0)
+            state_dict['log_std'] = torch.log(std_value)  # Add new 'log_std'
+            print(f"  std range: [{std_value.min().item():.6f}, {std_value.max().item():.6f}]")
+            print(f"  log_std range: [{state_dict['log_std'].min().item():.6f}, {state_dict['log_std'].max().item():.6f}]")
         
         # Check architecture compatibility
         checkpoint_has_old_actor = any('actor.0.weight' in k or 'actor.mlp.' in k for k in state_dict.keys())
         checkpoint_has_transformer = any('actor.seqTransEncoder' in k for k in state_dict.keys())
         model_has_mlp_actor = hasattr(self.actor, 'mlp') or isinstance(self.actor, nn.Sequential)
         
-        # Detect architecture mismatch
-        if checkpoint_has_transformer and not model_has_mlp_actor:
-            print("\n" + "="*80)
-            print("[WARNING] Architecture Mismatch Detected!")
-            print("="*80)
-            print("Checkpoint architecture: Transformer-based ActorCritic")
-            print("Current model architecture: MLP-based ActorCritic")
-            print("\nThese architectures are incompatible. Options:")
-            print("  1. Train a new model from scratch with MLP architecture")
-            print("  2. Switch back to Transformer architecture to use this checkpoint")
-            print("\n[INFO] Skipping checkpoint loading - model will use random initialization")
-            print("="*80 + "\n")
-            return False
         
         # Filter out RunningMeanStd buffer keys
         running_mean_std_patterns = [
@@ -343,18 +330,9 @@ class ActorCriticDualMLP(nn.Module):
     
     def get_std(self):
         """Get current action standard deviation."""
-        if self.noise_std_type == "scalar":
-            return self.std
-        elif self.noise_std_type == "log":
-            return torch.exp(self.log_std)
-        else:
-            raise ValueError(f"Unknown std type: {self.noise_std_type}")
+        log_std_clamped = torch.clamp(self.log_std, min=-20.0, max=2.0)
+        return torch.exp(log_std_clamped)
     
     def set_std(self, std):
         """Set action standard deviation."""
-        if self.noise_std_type == "scalar":
-            self.std.data = std
-        elif self.noise_std_type == "log":
-            self.log_std.data = torch.log(std)
-        else:
-            raise ValueError(f"Unknown std type: {self.noise_std_type}")
+        self.log_std.data = torch.log(torch.clamp(std, min=1e-6, max=10.0))

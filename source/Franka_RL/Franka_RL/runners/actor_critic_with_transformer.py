@@ -53,10 +53,12 @@ class ActorCriticWithTransformer(nn.Module):
         print(f"Actor: {self.actor}")
         print(f"Critic: {self.critic}")
 
-        # Action noise
+        # Action noise (use log_std for better numerical stability)
         self.noise_std_type = noise_std_type
         if self.noise_std_type == "scalar":
-            self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
+            # Legacy scalar parameterization (convert to log internally for stability)
+            self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
+            print(f"[INFO] Converting scalar std to log_std parameterization for numerical stability")
         elif self.noise_std_type == "log":
             self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
         else:
@@ -117,24 +119,20 @@ class ActorCriticWithTransformer(nn.Module):
     def update_distribution(self, observations):
         # compute mean
         mean = self.actor(observations)
-        # compute standard deviation with protection against negative values
-        if self.noise_std_type == "scalar":
-            # ✅ Protect against negative std values during training
-            std = torch.abs(self.std).expand_as(mean)
-        elif self.noise_std_type == "log":
-            # log_std is naturally protected (exp always positive)
-            std = torch.exp(self.log_std).expand_as(mean)
-        else:
-            raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
-        # create distribution with clamped std for numerical stability
-        safe_std = torch.clamp(std, min=1e-4, max=10.0)
+      
+        # log_std ∈ [-20, 2] → std ∈ [2e-9, 7.4]
+        log_std_clamped = torch.clamp(self.log_std, min=-20.0, max=2.0)
+        std = torch.exp(log_std_clamped).expand_as(mean)
+        
+        # Additional safety clamp for distribution creation
+        safe_std = torch.clamp(std, min=1e-6, max=10.0)
         self.distribution = Normal(mean, safe_std)
 
     def act(self, observations, **kwargs):
         """Sample action from current distribution with clipping."""
         self.update_distribution(observations)
         actions = self.distribution.sample()
-        # ✅ Clip actions to [-1, 1]
+     
         clipped_actions = torch.clamp(actions, -1.0, 1.0)
         return clipped_actions
 
@@ -144,7 +142,7 @@ class ActorCriticWithTransformer(nn.Module):
     def act_inference(self, observations):
         """Deterministic action for inference with clipping."""
         actions_mean = self.actor(observations)
-        # ✅ Clip actions to [-1, 1] for safe deployment
+  
         clipped_actions = torch.clamp(actions_mean, -1.0, 1.0)
         return clipped_actions
 
@@ -176,20 +174,18 @@ class ActorCriticWithTransformer(nn.Module):
         return value
 
     def load_state_dict(self, state_dict, strict=True):
-        """Load the parameters of the actor-critic model.
-
-        Args:
-            state_dict (dict): State dictionary of the model.
-            strict (bool): Whether to strictly enforce that the keys in state_dict match the keys returned by this
-                           module's state_dict() function.
-
-        Returns:
-            bool: Whether this training resumes a previous training. This flag is used by the `load()` function of
-                  `OnPolicyRunner` to determine how to load further parameters (relevant for, e.g., distillation).
-        """
-
-        super().load_state_dict(state_dict, strict=strict)
-        return True
+        """Load state dict with std conversion and optional strict mode."""
+       
+        if 'std' in state_dict and 'log_std' not in state_dict:
+            print("[INFO] Converting legacy 'std' parameter to 'log_std'")
+            std_value = state_dict.pop('std')  # Remove old 'std'
+            # Clamp std to valid range before taking log
+            std_value = torch.clamp(std_value, min=1e-6, max=10.0)
+            state_dict['log_std'] = torch.log(std_value)  # Add new 'log_std'
+            print(f"  std range: [{std_value.min().item():.6f}, {std_value.max().item():.6f}]")
+            print(f"  log_std range: [{state_dict['log_std'].min().item():.6f}, {state_dict['log_std'].max().item():.6f}]")
+        
+        return super().load_state_dict(state_dict, strict=strict)
 
     
 

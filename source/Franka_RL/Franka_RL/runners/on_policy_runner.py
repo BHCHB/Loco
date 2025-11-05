@@ -344,7 +344,8 @@ class OnPolicyRunner:
                 else:
                     self.writer.add_scalar("Episode/" + key, value, locs["it"])
                     ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
-        mean_std = self.alg.policy.std.mean()
+        # Use get_std() method (compatible with log_std parameterization)
+        mean_std = self.alg.policy.get_std().mean()
         fps = int(self.num_steps_per_env * self.env.num_envs / (locs["collection_time"] + locs["learn_time"]))
 
         self.writer.add_scalar("Loss/value_function", locs["mean_value_loss"], locs["it"])
@@ -439,11 +440,27 @@ class OnPolicyRunner:
         self.eval_mode()  # switch to evaluation mode (dropout for example)
         if device is not None:
             self.alg.policy.to(device)
-        policy = self.alg.policy.act_inference
+        
         if self.cfg["empirical_normalization"]:
             if device is not None:
                 self.obs_normalizer.to(device)
-            policy = lambda x: self.alg.policy.act_inference(self.obs_normalizer(x))  # noqa: E731
+            
+            # Handle both dict and tensor observations for normalization
+            def policy_with_normalization(x):
+                if isinstance(x, dict) or hasattr(x, 'keys'):
+                    # Dict observation: normalize policy obs only
+                    normalized_x = x.copy() if isinstance(x, dict) else {k: v for k, v in x.items()}
+                    if "policy" in normalized_x:
+                        normalized_x["policy"] = self.obs_normalizer(normalized_x["policy"])
+                    return self.alg.policy.act_inference(normalized_x)
+                else:
+                    # Tensor observation: normalize directly
+                    return self.alg.policy.act_inference(self.obs_normalizer(x))
+            
+            policy = policy_with_normalization
+        else:
+            policy = self.alg.policy.act_inference
+        
         return policy
 
     def train_mode(self):

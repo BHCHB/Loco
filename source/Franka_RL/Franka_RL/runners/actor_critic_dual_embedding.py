@@ -76,10 +76,12 @@ class ActorCriticWithDualEmbedding(nn.Module):
         self.critic = instantiate(critic_config)
         print(f"Critic: {self.critic}")
         
-        # Action noise
+        # Action noise (use log_std for better numerical stability)
         self.noise_std_type = noise_std_type
         if self.noise_std_type == "scalar":
-            self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
+            # Legacy scalar parameterization (convert to log internally for stability)
+            self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
+            print(f"[INFO] Converting scalar std to log_std parameterization for numerical stability")
         elif self.noise_std_type == "log":
             self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
         else:
@@ -192,25 +194,18 @@ class ActorCriticWithDualEmbedding(nn.Module):
         # Get action mean from actor (Transformer)
         mean = self.actor(features_dict)
         
-        # Compute standard deviation with protection against negative values
-        if self.noise_std_type == "scalar":
-            # ✅ Protect against negative std values during training
-            std = torch.abs(self.std).expand_as(mean)
-        elif self.noise_std_type == "log":
-            # log_std is naturally protected (exp always positive)
-            std = torch.exp(self.log_std).expand_as(mean)
-        else:
-            raise ValueError(f"Unknown std type: {self.noise_std_type}")
+        # log_std ∈ [-20, 2] → std ∈ [2e-9, 7.4]
+        log_std_clamped = torch.clamp(self.log_std, min=-20.0, max=2.0)
+        std = torch.exp(log_std_clamped).expand_as(mean)
         
-        # Create distribution with clamped std for numerical stability
-        safe_std = torch.clamp(std, min=1e-4, max=10.0)
+        # Additional safety clamp for distribution creation
+        safe_std = torch.clamp(std, min=1e-6, max=10.0)
         self.distribution = Normal(mean, safe_std)
     
     def act(self, observations, **kwargs):
         """Sample action from current distribution with clipping."""
         self.update_distribution(observations)
         actions = self.distribution.sample()
-        # ✅ Clip actions to [-1, 1]
         clipped_actions = torch.clamp(actions, -1.0, 1.0)
         return clipped_actions
     
@@ -225,7 +220,6 @@ class ActorCriticWithDualEmbedding(nn.Module):
         # Wrap features in dict for Transformer
         features_dict = {"policy_features": policy_features}
         actions_mean = self.actor(features_dict)
-        # ✅ Clip actions to [-1, 1] for safe deployment
         clipped_actions = torch.clamp(actions_mean, -1.0, 1.0)
         return clipped_actions
     
@@ -256,12 +250,22 @@ class ActorCriticWithDualEmbedding(nn.Module):
         return value
     
     def load_state_dict(self, state_dict, strict=True):
-        """Load model parameters and buffers including RunningMeanStd statistics.
+        """Load model parameters and buffers including RunningMeanStd statistics and std conversion.
         
         This method handles the special case where RunningMeanStd buffers (mean, var, count)
         might not be initialized yet when loading from a checkpoint. These buffers are
         lazily initialized on first forward pass, so we need to be flexible about loading them.
         """
+        
+        if 'std' in state_dict and 'log_std' not in state_dict:
+            print("[INFO] Converting legacy 'std' parameter to 'log_std'")
+            std_value = state_dict.pop('std')  # Remove old 'std'
+            # Clamp std to valid range before taking log
+            std_value = torch.clamp(std_value, min=1e-6, max=10.0)
+            state_dict['log_std'] = torch.log(std_value)  # Add new 'log_std'
+            print(f"  std range: [{std_value.min().item():.6f}, {std_value.max().item():.6f}]")
+            print(f"  log_std range: [{state_dict['log_std'].min().item():.6f}, {state_dict['log_std'].max().item():.6f}]")
+        
         # Filter out RunningMeanStd buffer keys that might not exist yet
         # These buffers are registered in RunningMeanStd but are lazily initialized
         running_mean_std_patterns = [
@@ -324,18 +328,9 @@ class ActorCriticWithDualEmbedding(nn.Module):
     
     def get_std(self):
         """Get current action standard deviation."""
-        if self.noise_std_type == "scalar":
-            return self.std
-        elif self.noise_std_type == "log":
-            return torch.exp(self.log_std)
-        else:
-            raise ValueError(f"Unknown std type: {self.noise_std_type}")
+        log_std_clamped = torch.clamp(self.log_std, min=-20.0, max=2.0)
+        return torch.exp(log_std_clamped)
     
     def set_std(self, std):
         """Set action standard deviation."""
-        if self.noise_std_type == "scalar":
-            self.std.data = std
-        elif self.noise_std_type == "log":
-            self.log_std.data = torch.log(std)
-        else:
-            raise ValueError(f"Unknown std type: {self.noise_std_type}")
+        self.log_std.data = torch.log(torch.clamp(std, min=1e-6, max=10.0))
